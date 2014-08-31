@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<!--
+	This software visualises conll formatted dependency-annotated text.
+	
+	Currently supports following visualizations:
+	1.	Collapsed dependency tree using quadratic Bezier curves
+	2.	Collapsed dependency tree using cubic Bezier curves
+	3.	Dendrogram using horizontal and vertical lines ('elbows') for links
+	4.	Tree diagram using d3 tree layout
+	
+	This software is build on D3 library. Sample data is dependency-annotated finnish and swedish sentences extracted from following sources:
+	Finnish data: http://bionlp.utu.fi/fintreebank.html
+	swedish data: http://www.maltparser.org/
+	
+	About: 
+		- D3, see http://d3js.org
+		- CoNLL data format, see http://www.ryanmcd.com/papers/conllXI.pdf
+		- Dependency Parsing, see e.g. http://www.mff.cuni.cz/veda/konference/wds/proc/pdf11/WDS11_123_i3_Green.pdf
+		- Natural Language Processing (NLP) tools, see e.g. http://nlp.stanford.edu/pubs/StanfordCoreNlp2014.pdf
+	
+	TODO:
+		- Better token and link label alignment for dense trees
+		- Bezier curve control point adjustment for long sentences
+		- cleanup the code
+	
+	Copyright:
+		Juhani Murto 2014
+		All rights reserved
+		
+-->
+<head>
+<meta charset="utf-8">
+<style>
+
+body {
+  font: 10px sans-serif;
+}
+
+.border {
+  fill: none;
+  shape-rendering: crispEdges;
+  stroke: #aaa;
+}
+
+	.node circle {
+	  fill: #fff;
+	  stroke: steelblue;
+	  stroke-width: 3px;
+	}
+	
+	.symbol {
+	  fill: #fff;
+	  opacity: 0.6;
+	  stroke: steelblue;
+	  stroke-width: 3px;
+	}
+
+	.node text { font: 12px sans-serif; }
+	
+	text.node_id { 
+		font: bold 0.8em sans-serif; 
+		/* fill: #ff0000; */
+	}
+
+	.link {
+	  fill: none;
+	  stroke: #daa;
+	  stroke-width: 2px;
+	}
+	
+	.labelText {
+		font: italic 0.9em arial sans-serif; 
+		fill: #777;
+	}
+	
+</style>
+
+</head>
+
+<body>
+<script src="http://d3js.org/d3.v2.js?2.9.6"></script>
+<script>
+"use strict";
+
+var margin = {top: 120, right: 20, bottom: 100, left: 20},
+    graphWidth = 640,
+    graphHeight = 400,
+    width = graphWidth - margin.left - margin.right,
+    height = graphHeight - margin.top - margin.bottom,
+    svg,
+    currSentence = null,
+    currData = null,
+    currGraphType = 0,
+    inputFile = "finnish_sample.conll", // <<<===== define input file here =============
+    sentenceChars = [], // charachters in sentence
+    treeStats = [], // array of nodes depth distribution in sentences
+    forest = []; // array of sentence dependendy tree data (json object arrays)  
+
+var orientations = {
+  "top-to-bottom-1": {
+    size: [width, height],
+    x: function(d) { return d.x; },
+    y: function(d) { return d.y; }
+  }
+};
+
+initSvg();
+createDependendyGraph(inputFile); 
+
+
+function initSvg() {
+	svg = d3.select("body").selectAll("svg")
+		.data(d3.entries(orientations))
+	  .enter().append("svg")
+		.attr("width", width + margin.left + margin.right)
+		.attr("height", height + margin.top + margin.bottom)
+	  .append("g")
+		.attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+	svg.append("rect")
+		.attr("width", width)
+		.attr("height", height)
+		.attr("class", "border");
+
+	//svg.append("text")
+		//.attr("x", 6)
+		//.attr("y", 6)
+		//.attr("dy", ".71em")
+		//.text(function(d) { return d.key; });
+}
+
+
+function changeGraphType(graphType) {
+	currGraphType = graphType;
+	drawGraph(currSentence, currData, currGraphType);
+}
+
+
+function drawTree(tree) {
+	currSentence = tree;
+	currData = forest[tree][0];
+	drawGraph(currSentence, currData, currGraphType);
+}
+
+/**--------------------------------------------
+ Parameters:
+	sentence: type integer
+	dependencyData: type json-object
+	graphType: type integer
+----------------------------------------------*/
+function drawGraph(sentence, dependencyData, graphType) {
+	
+  if(!dependencyData) return;
+  
+  var nodeVDist = 70, 
+	  averWord = Math.floor(sentenceChars[sentence]/treeStats[sentence].nodes),
+      leafNodes = treeStats[sentence].nodes - treeStats[sentence].parents,
+      charWidth = 7,
+      minNodeSpace = treeStats[sentence].nodes < 7 ? 40 : 20;
+      if(graphType == 3) { minNodeSpace = Math.ceil(40/treeStats[sentence].maxDepth); } // decrease nodespace rapidly in tree diagram
+
+  // calculate graph dimensions
+  if(graphType > 1) { // nodes distribution for tree type graphs
+	  graphWidth = leafNodes*(averWord*charWidth + minNodeSpace);  
+      graphHeight = treeStats[sentence].maxDepth*nodeVDist;
+   } else {
+	   graphWidth = sentenceChars[sentence]*charWidth + treeStats[sentence].nodes*minNodeSpace;  
+	   graphHeight = Math.ceil(graphWidth*0.2);
+   }
+   width = graphWidth; 
+   height = graphHeight; 
+   console.log( "sentence == " + sentence + ",  nodes == " + treeStats[sentence].nodes + ",  sentenceChars == " + sentenceChars[sentence] + 
+				",  averWord == " + averWord + ",  nodeVDist == " + nodeVDist + ",  depth == " + treeStats[sentence].maxDepth + ",  graphWidth == " + graphWidth + ",  graphHeight == " + graphHeight);
+   //console.log("\n==========================>> width == " + width + ", height == " + height);
+  
+  d3.select("body").selectAll("svg").remove(); 	// clear old graph
+  initSvg(); 
+	
+  // ------------------------------------------
+  // Render graph
+  // ------------------------------------------
+  svg.each(function(orientation, i) {
+    var svg = d3.select(this),
+        o = orientation.value;
+        
+      o.size = [width, height]; // set tree dimensions for d3 layout
+     //console.log("-------------=> o.size == " + o.size);
+        
+    // Compute the layout.
+  var tree = graphType == 3 ? d3.layout.tree().size(o.size) : d3.layout.cluster().size(o.size), // select d3 layout
+        nodes = tree.nodes(dependencyData),
+        links = tree.links(nodes);	  
+  
+  // -----------------------------------------------------------
+  // calculate node positions for collapsed dependency tree
+  // -----------------------------------------------------------
+/**
+  // set nodes evenly in x-axis
+  if(graphType < 2) { 
+	   var nodesCnt = nodes.length,
+			xMargin = 40;
+			xFirstPos = xMargin,
+			xLastPos = width - xMargin,
+			xDist = Math.floor( (xLastPos-xFirstPos)/(nodes.length - 1) );
+	   nodes.forEach(function(node) {
+					node.x = xFirstPos + (node.name - 1)*xDist;
+					node.y = height;
+					//console.log("\n---- node: " + node.toSource());
+				});
+  }
+*/
+  // adjust node position according to token length
+  if(graphType < 2) { 
+	   var nodesCnt = nodes.length,
+			xMargin = 22,
+			xFirstPos = xMargin,
+			xLastPos = width - xMargin,
+			xDist = Math.floor( (xLastPos-xFirstPos)/(nodes.length - 1) ), // average distance between nodes
+			nodeArr = [];
+	   nodes.forEach(function(node) {
+					node.x = xFirstPos + (node.name - 1)*xDist;
+					node.margin = Math.ceil(node.FORM.length*charWidth/2);
+					node.y = height;
+					nodeArr[node.name] = node;
+				});
+		for(var j=2; j<=nodeArr.length; j++) {
+			if(nodeArr[j]) {
+				//console.log("-- j == " + j + ", -- node == " + nodeArr[j].toSource() );
+				var txtSpace = (nodeArr[j].x - nodeArr[j].margin) - (nodeArr[j-1].x + nodeArr[j-1].margin); // text space between adjacent nodes
+				if( txtSpace > xMargin )
+					nodeArr[j].x -= (txtSpace - xMargin); // shift node to right if too far from previous node
+				else if ( txtSpace < xMargin )
+					nodeArr[j].x += (xMargin - txtSpace); // shift node to left if text overlaps with or is too close to text in previous node
+			}
+		}
+  }
+  
+  // ------------------------------------------
+  // Arrow-head marker
+  // ------------------------------------------
+  svg.append("defs").append("marker")
+    .attr("id", "arrowhead")
+    .attr("viewBox", "0 -5 10 10")
+    .attr("refX", function(d) { // align arrow head for different link types
+			if(graphType <2) return 13; 
+			else if(graphType == 2) return 8; 
+			else return 4; 
+		})
+    .attr("refY", 0)
+    .attr("markerUnits", "strokeWidth")
+    .attr("markerWidth", 6)
+    .attr("markerHeight", 6)
+    .attr("orient", "auto")
+  .append("path")
+    .attr("d", "M0,-5L10,0L0,5");
+        
+  // ------------------------------------------
+  // Links path generators
+  // ------------------------------------------
+  
+   // custom link path generator
+  function cubicBezier(d, i) {
+	  var xDiff = Math.abs((d.target.x - d.source.x)),
+		  yShift = Math.ceil(0.2*(1+(width-xDiff)/width)*xDiff), // linearly decreasing function of xDiff
+		  xShift = Math.floor(0.1*(1+(width-xDiff)/width)*xDiff); // linearly decreasing function of xDiff
+		  xShift = d.target.x > d.source.x ? xShift : -1*xShift;
+		  
+	  var path = "M"    + d.source.x + "," + d.source.y // set starting point
+			 + " C" + (d.source.x + xShift) + "," + (d.source.y -yShift)  // control point at the beginning of the curve
+			 + " "  + (d.target.x - xShift) + "," + (d.target.y -yShift)   // control point at the end of the curve
+			 + " "  + d.target.x + "," + (d.target.y);   // end of the curve
+			 
+	  //console.log("cubicBezier: " + d.source.name + " ==> " + d.target.name + "  xShift == " + xShift + "  PATH == " + path);
+	  
+	  return path;
+  }
+  
+  // custom link path generator
+  function quadraticBezier(d, i) {
+	  //var yShift = 25*Math.abs((d.target.name - d.source.name)); // set y-coord of control point, and thus the height of arc
+	  var yShift = Math.ceil(0.35*Math.abs((d.target.x - d.source.x))), // set y-coord of control point, and thus the height of arc
+		  // right-to-left curve
+		  L2R = "M"    + d.source.x + "," + d.source.y // set starting point
+			 + " Q" + (d.source.x + d.target.x)/2 + "," + (d.source.y -yShift)  // control point
+			 + " "  + d.target.x + "," + d.target.y;   // end of the curve
+	  
+		return L2R;
+  }
+    
+  // custom link path generator -- see http://stackoverflow.com/questions/10247800/tree-dendrogram-with-elbow-connectors-in-d3
+  function elbow(d, i) { 
+	  return "M" + d.source.x + "," + d.source.y
+		  + "H" + d.target.x + "V" + (d.target.y-5); 
+  }
+  
+  // d3 path generator
+  var diagonal = d3.svg.diagonal()
+						.target(function(d) { return {"x":(d.target.x), "y":(d.target.y-10)}; })
+						.projection( function(d) { return [o.x(d), o.y(d)]; });
+  
+  function  linkgenerator(graphType) {
+	  //console.log("------------------- invoke linkgenerator -------------------------- ");
+	  if(graphType == 0)
+		return quadraticBezier;	// custom link path generator
+	  else if(graphType == 1)
+		return cubicBezier;	// custom link path generator
+	  else if(graphType == 2)
+		return elbow;	// custom link path generator
+	  else  
+	    return diagonal;
+   }
+   
+		  
+  // --------------------------------
+  // 	Render links and link labels
+  // --------------------------------
+  var link = svg.selectAll("g.linkg")
+				.data(links)
+			.enter()
+			.append("g")
+				.attr("class", "linkg");
+			
+  var path = link.append("path")
+				.attr("class", "link")
+				.attr("marker-end", "url(#arrowhead)") // set arrowhead
+				.attr("d", linkgenerator(graphType)); // link path generator
+ 
+  //console.log("Length == " + path.node().getTotalLength() + " -- link == " + link.toSource());
+  // add link labels
+  path.each(function(d, i) { 
+	  // text positioning parameters
+	  var h = this.getTotalLength(),
+	  	  l = !isNaN(h) ? h : 0, // getTotalLength returns NaN in some situations
+	  	  s = graphType > 1 ? 0.8 : 0.6, // adjust position according to graph type
+		  p = this.getPointAtLength(s * l), 
+		  text = d.target.DEPREL,
+		  x = p.x && l>0 ? Math.ceil(p.x) : Math.ceil(0.25*d.source.x+0.75*d.target.x), // getTotalLength returns 0 in some situations - firefox bug??
+		  y = p.y && l>0 ? Math.ceil(p.y) : Math.ceil(0.25*d.source.y+0.75*d.target.y);
+	  addLinkLabel(x, y, text);
+  });
+
+  function addLinkLabel(x, y, label) {
+	  link.append("text")
+			.attr("class","labelText")
+			.attr("text-anchor", "middle")
+			.attr("x", x)
+			.attr("y", y)		
+			//.attr("dx",0)
+			.attr("dy",-3)
+			.text(label); 
+	}
+	
+  // ---------------------------------------------------------------------
+  // Render nodes after links -> node symbols will be drawn over links
+  // ---------------------------------------------------------------------
+	
+   // Declare the nodes
+  var node = svg.selectAll("g.node")
+	  .data(nodes);
+
+  // Enter the nodes.
+  var nodeEnter = node.enter().append("g")
+	  .attr("class", "node")
+	  .attr("transform", function(d) { 
+		  return "translate(" + o.x(d) + "," + o.y(d) + ")"; });
+		  	  
+  //insert node symbols
+  nodeEnter.append("path")
+	   .attr("class", "symbol")
+	   .attr("d", d3.svg.symbol()
+			.size(function(d) { return 220; }) 
+			.type(function(d) { return d.depth == 0 ? d3.svg.symbolTypes[2] : d3.svg.symbolTypes[0]; }));
+
+ nodeEnter.append("text")
+	  .attr("x", function(d, i) { return 1; })
+	  .attr("dy", "1.7em")
+	  .attr("text-anchor", function(d) { 
+		  return "middle"; })
+	  .text(function(d) { return d.FORM; })
+	  .style("fill-opacity", 1);  
+	  
+  // word position in sentence
+  nodeEnter.append("text")
+	  .attr("class", "node_id")
+	  .attr("x", 0)
+	  .attr("dy", "0.25em")
+	  .attr("fill", "red")
+	  .attr("text-anchor", function(d) { 
+		  return "middle"; })
+	  .text(function(d) { return d.name; });
+  });
+}
+  
+ 
+function createDependendyGraph(file) {
+	
+	// read dependency data from file into json objects array
+	d3.tsv(file, function(data) {
+	
+		var stc = [],
+			sentences = [],
+			sentenceMaps = [];
+		
+		// split input file data according to sentences
+		// -> store input data to sentences and sentenceMaps arrays
+		// -> sentenceMaps contain name: node maps for each sentence
+		// Following code parses flat json arrays to an array of hierarchical data objects, and is based on answer in: http://stackoverflow.com/questions/17847131/generate-multilevel-flare-json-data-format-from-flat-json
+		var dataMap = data.reduce(function(map, node) {
+			if(node.name) {
+				map[node.name] = node;
+				stc.push(node);
+			}
+			else if(map) {
+				sentenceMaps.push(map);
+				map = {};
+				sentences.push(stc);
+				stc = [];
+			}
+			return map;
+		}, {});
+		// push last sentence data to arrays
+		sentenceMaps.push(dataMap);
+		sentences.push(stc);
+
+		// create dependency tree data for each sentence and push tree data to forest array
+		for(var j=0; j<sentences.length; j++) {		
+			var tree = []; // create the tree array
+			sentences[j].forEach(function(node) {				
+				// add to parent
+				var parent = sentenceMaps[j][node.parent];
+				if (parent) {
+					// create child array if it doesn't exist
+					(parent.children || (parent.children = []))
+						// add node to child array
+						.push(node);
+				} else {
+					// parent is null or missing
+					tree.push(node);
+				}
+			});
+			forest.push(tree);
+			tree[0].depth = 0;
+			// show what we've got
+			//console.log("\n====>> tree:\n\n" + JSON.stringify(tree, null, '  '));
+			tree.depth = 0;
+			treeStats[j] = getTreeStats(tree[0], {maxDepth:0, nodes:0, parents:0});
+			//console.log("\n=========================================>> treeStats[" + j + "] == " + treeStats[j].toSource());
+		}
+
+		// -------------------------------------------------------
+		// Calculate tree nodes distribution
+		// -------------------------------------------------------
+		function getTreeStats(obj, res) {
+		  
+		  if(!obj) return res;  
+		  //console.log("\n==========>> OBJ-depth == " +  obj.depth + ", res == " + res.toSource() + ", OBJ == " + obj.toSource());	  
+		  var result = res, // object of type {maxDepth:x, nodes:y, parents:z},
+			  depth, // depth of current object in tree
+			  value,
+			  children;
+			
+		  // check if obj is an array
+		  if(Array.isArray(obj)) {
+			  for (var prop in obj) {
+				 var value = obj[prop];
+				 if (typeof value === 'object') {
+					  result.nodes++;
+					  depth = value.depth;
+					  if (value.children) {
+						result.parents++;
+						children = value.children;
+						if(Array.isArray(children)) {
+							for (var prop in children) {
+								 var child = children[prop];
+								 if (typeof child === 'object') 
+										child.depth = depth+1;
+							}
+						} else { 
+							children.depth = depth+1;
+						}
+						if(depth+1 > result.maxDepth) 
+							result.maxDepth = depth+1;
+						getTreeStats(children, result);
+					  } 
+				 }
+			  }
+		  }
+		  else if (typeof obj === 'object') {
+			  result.nodes++;
+			  depth = obj.depth;
+			  if (obj.children) {
+				result.parents++;
+				children = obj.children;
+				if(Array.isArray(children)) {
+					for (var prop in children) {
+						 var child = children[prop];
+						 if (typeof child === 'object') 
+								child.depth = depth+1;
+					}
+				} else { 
+					children.depth = depth+1;
+				}
+				if(depth+1 > result.maxDepth) 
+					result.maxDepth = depth+1;
+				getTreeStats(children, result);
+			  } 
+		  }
+		  return result;
+		}
+					
+		// -------------------------------------
+		// drop down selection lists 
+		// -------------------------------------
+		var wrapper = d3.select('body')
+			.append('div')
+				.style('float','left')
+				.style('position','relative');
+				
+		// graph type selection
+		var graphTypes = ['Collapsed tree - quadratic Bezier', 'Collapsed tree - cubic Bezier', 'Dendrodram', 'tree'], 
+			graphSelection = wrapper.append('div')
+				.style('position','absolute')
+				.style('left','30px')
+				.style('top','20px')
+			.append('label')
+				.html('Graph type')
+			.append('select')
+				.attr('onChange','changeGraphType(this.value)')
+			.selectAll('option.graphSel')
+				.data(graphTypes)
+				.enter()
+				.append('option')
+					.attr('class','graphSel')
+					.attr('value', function(d,i) { return i; })
+					.text(function(d) { return d; });
+		
+		
+		// sentence selection
+		var wordSelection = wrapper.append('div')
+				.style('position','absolute')
+				.style('left','30px')
+				.style('top','60px')
+			.append('label')
+				.html('Sentence')
+			.append('select')
+				.attr('onChange','drawTree(this.value)');
+				
+		wordSelection.append('option')
+				.text("Select sentence:");
+				
+		wordSelection.selectAll('option.treeSel')
+			.data(sentences)
+			.enter()
+			.append('option')
+				.attr('class','treeSel')
+				.attr('value', function(d,i) { return i; })
+				.text(function(d,i) { 
+						var words="",
+						    cnt = 0,
+						    len = 0;
+						for(var j in sentenceMaps[i]) {
+							if(cnt < 15) {
+								if(sentenceMaps[i][j].FORM.match(/[^.,]/))
+									words += " " + sentenceMaps[i][j].FORM;
+								else
+									words += sentenceMaps[i][j].FORM;
+							} else {
+								words += "."
+							}
+							cnt++;
+							len += sentenceMaps[i][j].FORM.length +1;
+						}
+						sentenceChars[i] = len;
+						return words;
+					});
+	});
+}
+
+</script>
+</body>
+</html>
